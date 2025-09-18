@@ -30,10 +30,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/go-github/v27/github"
+	"github.com/google/go-github/v74/github"
 	"golang.org/x/oauth2"
 
-	"github.com/sourcegraph/zoekt/internal/gitindex"
+	"github.com/sourcegraph/zoekt/gitindex"
 )
 
 type topicsFlag []string
@@ -51,6 +51,7 @@ type reposFilters struct {
 	topics        []string
 	excludeTopics []string
 	noArchived    *bool
+	noPrivate     *bool
 }
 
 func main() {
@@ -61,6 +62,7 @@ func main() {
 	token := flag.String("token", "", "file holding API token. If not set defaults to $HOME/.github-token if present, else uses unauthenticated GitHub client.")
 	forks := flag.Bool("forks", false, "also mirror forks.")
 	deleteRepos := flag.Bool("delete", false, "delete missing repos")
+	noPrivate := flag.Bool("no_private", false, "no private repos, but includes internal repos")
 	namePattern := flag.String("name", "", "only clone repos whose name matches the given regexp.")
 	excludePattern := flag.String("exclude", "", "don't mirror repos whose names match this regexp.")
 	topics := topicsFlag{}
@@ -68,6 +70,7 @@ func main() {
 	excludeTopics := topicsFlag{}
 	flag.Var(&excludeTopics, "exclude_topic", "don't clone repos whose have one of given topics. You can add multiple topics by setting this more than once.")
 	noArchived := flag.Bool("no_archived", false, "mirror only projects that are not archived")
+	verbose := flag.Bool("verbose", false, "print detailed information about repositories")
 
 	flag.Parse()
 
@@ -109,6 +112,7 @@ func main() {
 		topics:        topics,
 		excludeTopics: excludeTopics,
 		noArchived:    noArchived,
+		noPrivate:     noPrivate,
 	}
 	var repos []*github.Repository
 	var err error
@@ -123,6 +127,15 @@ func main() {
 
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if *verbose {
+		log.Printf("Found %d repositories:", len(repos))
+		for i, repo := range repos {
+			log.Printf("%d. %s",
+				i+1,
+				*repo.FullName)
+		}
 	}
 
 	if !*forks {
@@ -228,11 +241,15 @@ func hasIntersection(s1, s2 []string) bool {
 	return false
 }
 
-func filterRepositories(repos []*github.Repository, include []string, exclude []string, noArchived bool) (filteredRepos []*github.Repository) {
+func filterRepositories(repos []*github.Repository, include []string, exclude []string, noArchived bool, noPrivate bool) (filteredRepos []*github.Repository) {
 	for _, repo := range repos {
 		if noArchived && *repo.Archived {
 			continue
 		}
+		if noPrivate && repo.GetVisibility() == "private" {
+			continue
+		}
+
 		if (len(include) == 0 || hasIntersection(include, repo.Topics)) &&
 			!hasIntersection(exclude, repo.Topics) {
 			filteredRepos = append(filteredRepos, repo)
@@ -243,7 +260,9 @@ func filterRepositories(repos []*github.Repository, include []string, exclude []
 
 func getOrgRepos(client *github.Client, org string, reposFilters reposFilters) ([]*github.Repository, error) {
 	var allRepos []*github.Repository
-	opt := &github.RepositoryListByOrgOptions{}
+	opt := &github.RepositoryListByOrgOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
 	for {
 		repos, resp, err := client.Repositories.ListByOrg(context.Background(), org, opt)
 		if err != nil {
@@ -254,7 +273,7 @@ func getOrgRepos(client *github.Client, org string, reposFilters reposFilters) (
 		}
 
 		opt.Page = resp.NextPage
-		repos = filterRepositories(repos, reposFilters.topics, reposFilters.excludeTopics, *reposFilters.noArchived)
+		repos = filterRepositories(repos, reposFilters.topics, reposFilters.excludeTopics, *reposFilters.noArchived, *reposFilters.noPrivate)
 		allRepos = append(allRepos, repos...)
 		if resp.NextPage == 0 {
 			break
@@ -265,7 +284,9 @@ func getOrgRepos(client *github.Client, org string, reposFilters reposFilters) (
 
 func getUserRepos(client *github.Client, user string, reposFilters reposFilters) ([]*github.Repository, error) {
 	var allRepos []*github.Repository
-	opt := &github.RepositoryListOptions{}
+	opt := &github.RepositoryListOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
 	for {
 		repos, resp, err := client.Repositories.List(context.Background(), user, opt)
 		if err != nil {
@@ -276,7 +297,7 @@ func getUserRepos(client *github.Client, user string, reposFilters reposFilters)
 		}
 
 		opt.Page = resp.NextPage
-		repos = filterRepositories(repos, reposFilters.topics, reposFilters.excludeTopics, *reposFilters.noArchived)
+		repos = filterRepositories(repos, reposFilters.topics, reposFilters.excludeTopics, *reposFilters.noArchived, *reposFilters.noPrivate)
 		allRepos = append(allRepos, repos...)
 		if resp.NextPage == 0 {
 			break
